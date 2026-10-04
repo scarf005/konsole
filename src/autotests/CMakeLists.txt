@@ -40,6 +40,8 @@ ecm_add_tests(
     LINK_LIBRARIES konsoleprivate Qt::Test ${KONSOLE_TEST_LIBS}
 )
 
+target_link_libraries(TerminalTest konsolecolorscheme KF6::CoreAddons)
+
 ecm_add_test(
     ProcessInfoTest.cpp
     LINK_LIBRARIES konsoleprivate KF6::CoreAddons Qt::Test ${KONSOLE_TEST_LIBS}

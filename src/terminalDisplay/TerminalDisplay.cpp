@@ -23,6 +23,7 @@
 #include <QElapsedTimer>
 #include <QEvent>
 #include <QFileInfo>
+#include <QImage>
 #include <QKeyEvent>
 #include <QLabel>
 #include <QMimeData>
@@ -30,7 +31,10 @@
 #include <QScrollEvent>
 #include <QScrollPrepareEvent>
 #include <QScroller>
+#include <QStandardPaths>
 #include <QStyle>
+#include <QTemporaryDir>
+#include <QTemporaryFile>
 #include <QTimer>
 #include <QVBoxLayout>
 
@@ -2637,6 +2641,10 @@ void TerminalDisplay::copyToClipboard(Screen::DecodingOptions options)
 
 void TerminalDisplay::pasteFromClipboard(bool appendEnter)
 {
+    if (_screenWindow.isNull() || _readOnly) {
+        return;
+    }
+
     QString text;
     const QMimeData *mimeData = QApplication::clipboard()->mimeData(QClipboard::Clipboard);
     if (mimeData == nullptr) {
@@ -2648,6 +2656,23 @@ void TerminalDisplay::pasteFromClipboard(bool appendEnter)
     // - paste the path(s) as a space-separated list of strings, which are quoted if needed
     if (!mimeData->hasUrls()) { // fast path if there are no urls
         text = mimeData->text();
+        if (text.isEmpty() && mimeData->hasImage()) {
+            const QImage image = qvariant_cast<QImage>(mimeData->imageData());
+            if (image.isNull()) {
+                return;
+            }
+
+            // Keep pasted images available until Konsole exits, even if the originating view is closed.
+            static QTemporaryDir imagePasteDirectory(QStandardPaths::writableLocation(QStandardPaths::TempLocation)
+                                                     + QStringLiteral("/konsole-clipboard-XXXXXX"));
+            QTemporaryFile imageFile(imagePasteDirectory.path() + QStringLiteral("/image-XXXXXX.png"));
+            if (!imagePasteDirectory.isValid() || !imageFile.open() || !image.save(&imageFile, "PNG") || !imageFile.flush()) {
+                KMessageBox::error(window(), i18n("Could not save the clipboard image."));
+                return;
+            }
+            imageFile.setAutoRemove(false);
+            text = KShell::quoteArg(imageFile.fileName()) + QLatin1Char(' ');
+        }
     } else { // handle local file urls
         const QList<QUrl> list = mimeData->urls();
         for (const QUrl &url : list) {

@@ -19,6 +19,12 @@ private Q_SLOTS:
     void testScrollBarPositions();
     void testColorTable();
     void testSize();
+    void testClipboardImage();
+    void testClipboardImageShortcut();
+    void testClipboardImageWithText();
+    void testClipboardImageWithUrls();
+    void testClipboardImageReadOnly();
+    void testClipboardInvalidImage();
 
 private:
 };
