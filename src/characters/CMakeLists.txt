@@ -8,6 +8,7 @@ target_sources(konsolecharacters PRIVATE
     Hangul.cpp
     LineBlockCharacters.cpp
     ExtendedCharTable.cpp
+    KittyPlaceholder.cpp
 )
 
 ecm_qt_declare_logging_category(konsolecharacters

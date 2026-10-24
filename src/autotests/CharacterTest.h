@@ -15,6 +15,7 @@ class CharacterTest : public QObject
     Q_OBJECT
 
 private Q_SLOTS:
+    void testKittyPlaceholderDecode();
 };
 
 }
