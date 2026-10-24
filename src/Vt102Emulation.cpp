@@ -2416,7 +2416,7 @@ void Vt102Emulation::processGraphicsToken(int tokenSize)
 {
     QString value = QString::fromUcs4(&tokenBuffer[1], tokenSize - 1);
     QStringList list;
-    QPixmap pixmap;
+    QImage image;
 
     int dataPos = value.indexOf(QLatin1Char(';'));
     if (dataPos == -1) {
@@ -2523,10 +2523,9 @@ void Vt102Emulation::processGraphicsToken(int tokenSize)
                     return;
                 }
                 QImage::Format format = keys['f'] == 24 ? QImage::Format_RGB888 : QImage::Format_RGBA8888;
-                pixmap = QPixmap::fromImage(QImage((const uchar *)out.constData(), 0 + keys['s'], 0 + keys['v'], 0 + keys['s'] * keys['f'] / 8, format));
-                pixmap.detach();
+                image = QImage((const uchar *)out.constData(), 0 + keys['s'], 0 + keys['v'], 0 + keys['s'] * keys['f'] / 8, format).copy();
             } else {
-                pixmap.loadFromData(out);
+                image.loadFromData(out);
             }
 
             if (keys['a'] == 'q') {
@@ -2534,7 +2533,7 @@ void Vt102Emulation::processGraphicsToken(int tokenSize)
                 sendGraphicsReply(params, QString());
             } else {
                 if (keys['i']) {
-                    _graphicsImages[keys['i']] = pixmap;
+                    _graphicsImages[keys['i']] = image;
                 }
                 if (keys['q'] == 0 && keys['a'] == 't') {
                     QString params = QStringLiteral("i=") + QString::number(keys['i']);
@@ -2554,20 +2553,20 @@ void Vt102Emulation::processGraphicsToken(int tokenSize)
     }
     if (keys['a'] == 'p' || (keys['a'] == 'T' && keys['m'] == 0)) {
         if (keys['a'] == 'p') {
-            pixmap = _graphicsImages[keys['i']];
+            image = _graphicsImages.value(keys['i']);
         }
-        if (!pixmap.isNull()) {
+        if (!image.isNull()) {
             if (keys['x'] || keys['y'] || keys['w'] || keys['h']) {
-                int w = keys['w'] ? keys['w'] : pixmap.width() - keys['x'];
-                int h = keys['h'] ? keys['h'] : pixmap.height() - keys['y'];
-                pixmap = pixmap.copy(keys['x'], keys['y'], w, h);
+                int w = keys['w'] ? keys['w'] : image.width() - keys['x'];
+                int h = keys['h'] ? keys['h'] : image.height() - keys['y'];
+                image = image.copy(keys['x'], keys['y'], w, h);
             }
             if (keys['c'] && keys['r']) {
-                pixmap = pixmap.scaled(keys['c'] * _currentScreen->currentTerminalDisplay()->terminalFont()->fontWidth(),
-                                       keys['r'] * _currentScreen->currentTerminalDisplay()->terminalFont()->fontHeight());
+                image = image.scaled(keys['c'] * _currentScreen->currentTerminalDisplay()->terminalFont()->fontWidth(),
+                                     keys['r'] * _currentScreen->currentTerminalDisplay()->terminalFont()->fontHeight());
             }
             int rows = -1, cols = -1;
-            _currentScreen->addPlacement(pixmap,
+            _currentScreen->addPlacement(QPixmap::fromImage(image),
                                          rows,
                                          cols,
                                          -1,
