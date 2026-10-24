@@ -765,6 +765,49 @@ void Vt102EmulationTest::testKittyKeyboardTextKeys()
     }
 }
 
+void Vt102EmulationTest::testKittyGraphicsQuery()
+{
+    TestEmulation em;
+    em.reset();
+    em.setCodec(TestEmulation::Utf8Codec);
+
+    // Capability probe sent by Claude Code
+    const char query[] = "\033_Gi=31,s=1,v=1,a=q,t=d,f=24;AAAA\033\\";
+    em.receiveData(query, sizeof(query) - 1);
+    QCOMPARE(em.lastSent, QByteArray("\033_Gi=31;OK\033\\"));
+
+    // Image ids are unsigned 32 bit integers
+    em.lastSent.clear();
+    const char bigId[] = "\033_Gi=4294967295,s=1,v=1,a=q,f=24;AAAA\033\\";
+    em.receiveData(bigId, sizeof(bigId) - 1);
+    QCOMPARE(em.lastSent, QByteArray("\033_Gi=4294967295;OK\033\\"));
+}
+
+void Vt102EmulationTest::testKittyGraphicsMalformed()
+{
+    const char *inputs[] = {
+        "\033_G\033\\",
+        "\033_Ga\033\\",
+        "\033_Ga=\033\\",
+        "\033_G=\033\\",
+        "\033_G,,\033\\",
+        "\033_Gi=1x,a=q\033\\",
+        "\033_Gi=99999999999999999999,a=q\033\\",
+        "\033_\033\\",
+        "\033_Ga=q,f=32,s=-1,v=-1;AAAA\033\\",
+        "\033_Ga=p,i=12345\033\\",
+        "\033_Ga=d,d=\033\\",
+    };
+    for (const char *input : inputs) {
+        TestEmulation em;
+        em.reset();
+        em.setCodec(TestEmulation::Utf8Codec);
+        em.receiveData(input, strlen(input));
+        // Parsing continues normally afterwards
+        sendAndCompare(&em, "a", 1, QStringLiteral("a"), em.lastSent);
+    }
+}
+
 QTEST_GUILESS_MAIN(Vt102EmulationTest)
 
 #include "moc_Vt102EmulationTest.cpp"

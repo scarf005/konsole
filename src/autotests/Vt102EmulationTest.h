@@ -44,6 +44,9 @@ private Q_SLOTS:
     void testKittyKeyboardCtrlLetters();
     void testKittyKeyboardTextKeys();
 
+    void testKittyGraphicsQuery();
+    void testKittyGraphicsMalformed();
+
 private:
     static void sendAndCompare(TestEmulation *em, const char *input, size_t inputLen, const QString &expectedPrint, const QByteArray &expectedSent);
 };
