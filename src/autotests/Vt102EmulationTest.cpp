@@ -8,7 +8,13 @@
 #include "Vt102EmulationTest.h"
 
 #include <QSignalSpy>
+#include <QTemporaryDir>
 #include <QTest>
+
+#include <fcntl.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 // The below is to verify the old #defines match the new constexprs
 // Just copy/paste for now from Vt102Emulation.cpp
@@ -806,6 +812,87 @@ void Vt102EmulationTest::testKittyGraphicsMalformed()
         // Parsing continues normally afterwards
         sendAndCompare(&em, "a", 1, QStringLiteral("a"), em.lastSent);
     }
+}
+
+static QByteArray graphicsCommand(const char *keys, const QByteArray &payload)
+{
+    return QByteArray("\033_G") + keys + ';' + payload.toBase64() + "\033\\";
+}
+
+void Vt102EmulationTest::testKittyGraphicsMediums()
+{
+    TestEmulation em;
+    em.reset();
+    em.setCodec(TestEmulation::Utf8Codec);
+    auto send = [&em](const char *keys, const QByteArray &payload) {
+        em.lastSent.clear();
+        const QByteArray command = graphicsCommand(keys, payload);
+        em.receiveData(command.constData(), command.size());
+    };
+
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QByteArray pixel("\x10\x20\x30\x40\x50\x60", 6);
+    const QByteArray path = QFile::encodeName(dir.filePath(QStringLiteral("pixel.rgb")));
+    QFile file(QFile::decodeName(path));
+    QVERIFY(file.open(QIODevice::WriteOnly));
+    file.write(pixel);
+    file.close();
+
+    // t=f reads the file, S and O select a range of it
+    send("a=t,t=f,f=24,s=1,v=1,i=5", path);
+    QCOMPARE(em.lastSent, QByteArray("\033_Gi=5;OK\033\\"));
+    QCOMPARE(em._graphicsImages.value(5).pixelColor(0, 0), QColor(0x10, 0x20, 0x30));
+    send("a=t,t=f,f=24,s=1,v=1,i=6,O=3,S=3", path);
+    QCOMPARE(em.lastSent, QByteArray("\033_Gi=6;OK\033\\"));
+    QCOMPARE(em._graphicsImages.value(6).pixelColor(0, 0), QColor(0x40, 0x50, 0x60));
+    QVERIFY(file.exists());
+
+    // Capability probe with a file
+    send("a=q,t=f,f=24,s=1,v=1,i=7", path);
+    QCOMPARE(em.lastSent, QByteArray("\033_Gi=7;OK\033\\"));
+    QVERIFY(!em._graphicsImages.contains(7));
+
+    // Errors
+    send("a=t,t=f,f=24,s=1,v=1,i=8", path + "-missing");
+    QCOMPARE(em.lastSent, QByteArray("\033_Gi=8;ENOENT:Failed to open file\033\\"));
+    send("a=t,t=f,f=24,s=1,v=1,i=8", QFile::encodeName(dir.path()));
+    QCOMPARE(em.lastSent, QByteArray("\033_Gi=8;EINVAL:Not a regular file\033\\"));
+    const QByteArray fifo = QFile::encodeName(dir.filePath(QStringLiteral("fifo")));
+    QCOMPARE(mkfifo(fifo.constData(), 0600), 0);
+    send("a=t,t=f,f=24,s=1,v=1,i=8", fifo);
+    QCOMPARE(em.lastSent, QByteArray("\033_Gi=8;EINVAL:Not a regular file\033\\"));
+    send("a=t,t=f,f=24,s=1,v=1,i=8,O=7", path);
+    QCOMPARE(em.lastSent, QByteArray("\033_Gi=8;EINVAL:Invalid size or offset\033\\"));
+    send("a=t,t=x,f=24,s=1,v=1,i=8", path);
+    QCOMPARE(em.lastSent, QByteArray("\033_Gi=8;EINVAL:Unknown transmission medium\033\\"));
+    send("a=t,t=f,f=24,s=1,v=1,i=8,q=2", path + "-missing");
+    QCOMPARE(em.lastSent, QByteArray());
+    QVERIFY(!em._graphicsImages.contains(8));
+
+    // t=t deletes only files that are marked as temporary
+    send("a=t,t=t,f=24,s=1,v=1,i=9", path);
+    QCOMPARE(em.lastSent, QByteArray("\033_Gi=9;OK\033\\"));
+    QVERIFY(file.exists());
+    const QByteArray tempPath = QFile::encodeName(dir.filePath(QStringLiteral("tty-graphics-protocol-1.rgb")));
+    QVERIFY(QFile::copy(QFile::decodeName(path), QFile::decodeName(tempPath)));
+    send("a=t,t=t,f=24,s=1,v=1,i=10", tempPath);
+    QCOMPARE(em.lastSent, QByteArray("\033_Gi=10;OK\033\\"));
+    QVERIFY(em._graphicsImages.contains(10));
+    QVERIFY(!QFile::exists(QFile::decodeName(tempPath)));
+
+    // t=s reads and unlinks POSIX shared memory
+    const QByteArray shmName = "/konsole-test-" + QByteArray::number(QCoreApplication::applicationPid());
+    int fd = shm_open(shmName.constData(), O_CREAT | O_RDWR | O_EXCL, 0600);
+    QVERIFY(fd >= 0);
+    QCOMPARE(write(fd, pixel.constData(), pixel.size()), pixel.size());
+    close(fd);
+    send("a=t,t=s,f=24,s=1,v=1,i=11", shmName);
+    QCOMPARE(em.lastSent, QByteArray("\033_Gi=11;OK\033\\"));
+    QCOMPARE(em._graphicsImages.value(11).pixelColor(0, 0), QColor(0x10, 0x20, 0x30));
+    QCOMPARE(shm_open(shmName.constData(), O_RDONLY, 0), -1);
+    send("a=t,t=s,f=24,s=1,v=1,i=12", shmName);
+    QCOMPARE(em.lastSent, QByteArray("\033_Gi=12;ENOENT:Failed to open file\033\\"));
 }
 
 QTEST_GUILESS_MAIN(Vt102EmulationTest)
