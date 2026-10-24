@@ -131,6 +131,8 @@ private:
                        CharacterColor const *ulColorTable);
     void drawImagesBelowText(QPainter &painter, const QRect &rect, int fontWidth, int fontHeight, int &placementIdx, QRegion &sixelRegion);
     void drawImagesAboveText(QPainter &painter, const QRect &rect, int fontWidth, int fontHeight, int &placementIdx);
+    // draws the kitty graphics images shown by Unicode placeholder cells in columns left to right of a line
+    void drawImagePlaceholders(QPainter &painter, const Character *line, int left, int right, QPoint origin, int fontWidth, int fontHeight);
 
     void drawTextCharacters(QPainter &painter,
                             const QRect &rect,

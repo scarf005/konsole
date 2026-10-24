@@ -2615,6 +2615,7 @@ void Vt102Emulation::processGraphicsToken(int tokenSize)
                 sendGraphicsReply(params, image.isNull() ? QStringLiteral("EINVAL:Failed to decode image") : QString());
             } else {
                 if (keys['i']) {
+                    removeVirtualPlacements(keys['i']);
                     _graphicsImages[keys['i']] = image;
                 }
                 if (keys['q'] == 0 && keys['a'] == 't') {
@@ -2643,26 +2644,38 @@ void Vt102Emulation::processGraphicsToken(int tokenSize)
                 int h = keys['h'] ? keys['h'] : image.height() - keys['y'];
                 image = image.copy(keys['x'], keys['y'], w, h);
             }
-            if (keys['c'] && keys['r']) {
+            if (keys['U'] == 1 && keys['i'] > 0) {
+                // Displayed by placeholder cells, see TerminalPainter::drawImagePlaceholders()
+                const TerminalDisplay *display = _currentScreen->currentTerminalDisplay();
+                const int fontWidth = display ? display->terminalFont()->fontWidth() : 1;
+                const int fontHeight = display ? display->terminalFont()->fontHeight() : 1;
+                const int cols = keys['c'] > 0 ? qMin<qint64>(keys['c'], 1000) : (image.width() + fontWidth - 1) / fontWidth;
+                const int rows = keys['r'] > 0 ? qMin<qint64>(keys['r'], 1000) : (image.height() + fontHeight - 1) / fontHeight;
+                for (Screen *screen : _screen) {
+                    screen->virtualPlacements()[keys['i']] = TerminalGraphicsVirtualPlacement_t{image, cols, rows, {}, {}, {}};
+                }
+            } else if (keys['U'] != 1 && keys['c'] && keys['r']) {
                 image = image.scaled(keys['c'] * _currentScreen->currentTerminalDisplay()->terminalFont()->fontWidth(),
                                      keys['r'] * _currentScreen->currentTerminalDisplay()->terminalFont()->fontHeight());
             }
-            int rows = -1, cols = -1;
-            _currentScreen->addPlacement(QPixmap::fromImage(image),
-                                         rows,
-                                         cols,
-                                         -1,
-                                         -1,
-                                         TerminalGraphicsPlacement_t::Kitty,
-                                         true,
-                                         keys['C'] == 0,
-                                         true,
-                                         keys['z'],
-                                         keys['i'],
-                                         keys['p'],
-                                         keys['A'] / 255.0,
-                                         keys['X'],
-                                         keys['Y']);
+            if (keys['U'] != 1) {
+                int rows = -1, cols = -1;
+                _currentScreen->addPlacement(QPixmap::fromImage(image),
+                                             rows,
+                                             cols,
+                                             -1,
+                                             -1,
+                                             TerminalGraphicsPlacement_t::Kitty,
+                                             true,
+                                             keys['C'] == 0,
+                                             true,
+                                             keys['z'],
+                                             keys['i'],
+                                             keys['p'],
+                                             keys['A'] / 255.0,
+                                             keys['X'],
+                                             keys['Y']);
+            }
             if (keys['q'] == 0 && keys['i']) {
                 QString params = QStringLiteral("i=") + QString::number(keys['i']);
                 if (keys['I']) {
@@ -2682,8 +2695,8 @@ void Vt102Emulation::processGraphicsToken(int tokenSize)
     }
     if (keys['a'] == 'd') {
         int action = keys['d'] | 0x20;
-        int id = keys['i'];
-        int pid = keys['p'];
+        qint64 id = keys['i'];
+        qint64 pid = keys['p'];
         int x = keys['x'];
         int y = keys['y'];
         if (action == 'n') {
@@ -2693,6 +2706,19 @@ void Vt102Emulation::processGraphicsToken(int tokenSize)
             y = _currentScreen->getCursorY();
         }
         _currentScreen->delPlacements(action, id, pid, x, y, keys['z']);
+        if (action == 'i') {
+            removeVirtualPlacements(id);
+            if (keys['d'] == 'I') {
+                _graphicsImages.remove(id);
+            }
+        }
+    }
+}
+
+void Vt102Emulation::removeVirtualPlacements(quint32 id)
+{
+    for (Screen *screen : _screen) {
+        screen->virtualPlacements().remove(id);
     }
 }
 

@@ -24,6 +24,7 @@ private Q_SLOTS:
     void testBlockSelection();
     void testCJKBlockSelection();
     void testCursorPosition();
+    void testKittyPlaceholders();
 
 private:
     void doLargeScreenCopyVerification(const QString &putToScreen, const QString &expectedSelection);

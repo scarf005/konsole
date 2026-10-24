@@ -268,6 +268,7 @@ protected:
 
 private:
     void processGraphicsToken(int tokenSize);
+    void removeVirtualPlacements(quint32 id);
 
     void sendGraphicsReply(const QString &params, const QString &error);
     void reportTerminalType();

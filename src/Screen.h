@@ -13,6 +13,9 @@
 
 // Qt
 #include <QBitArray>
+#include <QHash>
+#include <QImage>
+#include <QPixmap>
 #include <QPointer>
 #include <QRect>
 #include <QSet>
@@ -46,6 +49,16 @@ struct TerminalGraphicsPlacement_t {
     qreal opacity;
     bool scrolling;
     enum source { Sixel, iTerm, Kitty } source;
+};
+
+// Kitty graphics virtual placement, displayed by Unicode placeholder cells
+struct TerminalGraphicsVirtualPlacement_t {
+    QImage image;
+    int cols, rows;
+    // image fitted into a box of cols x rows cells, cached by the painter
+    QSize box;
+    QPoint offset;
+    QPixmap fitted;
 };
 
 namespace Konsole
@@ -704,7 +717,12 @@ public:
 
     bool hasGraphics() const
     {
-        return _hasGraphics;
+        return _hasGraphics || !_virtualPlacements.isEmpty();
+    }
+    // Kitty graphics virtual placements by image id
+    QHash<quint32, TerminalGraphicsVirtualPlacement_t> &virtualPlacements()
+    {
+        return _virtualPlacements;
     }
     void setIgnoreWcWidth(bool ignore);
 
@@ -910,6 +928,7 @@ private:
     std::vector<std::unique_ptr<TerminalGraphicsPlacement_t>> _graphicsPlacements;
     void scrollPlacements(int n, qint64 below = INT64_MAX, qint64 above = INT64_MAX);
     bool _hasGraphics;
+    QHash<quint32, TerminalGraphicsVirtualPlacement_t> _virtualPlacements;
 
     //
     bool _ignoreWcWidth;

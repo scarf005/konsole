@@ -240,6 +240,22 @@ void ScreenTest::testCursorPosition()
     delete screen;
 }
 
+void ScreenTest::testKittyPlaceholders()
+{
+    Screen screen(3, 10);
+    screen.setForeColor(COLOR_SPACE_RGB, 42);
+    for (char32_t c : std::u32string_view(U"\U0010EEEE\u0305\u0305\u030E\U0010EEEE\U0010EEEE\u030Dx")) {
+        screen.displayCharacter(c);
+    }
+    // Each placeholder takes one cell, diacritics combine with it
+    QCOMPARE(screen.getCursorX(), 4);
+
+    // Placeholders are not copied as text
+    screen.setSelectionStart(0, 0, false);
+    screen.setSelectionEnd(9, 0, false);
+    QCOMPARE(screen.selectedText(Screen::PlainText), QStringLiteral("x\n"));
+}
+
 QTEST_GUILESS_MAIN(ScreenTest)
 
 #include "moc_ScreenTest.cpp"

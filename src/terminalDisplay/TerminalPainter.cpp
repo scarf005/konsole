@@ -11,6 +11,7 @@
 
 // Konsole
 #include "../Screen.h"
+#include "../characters/KittyPlaceholder.h"
 #include "../characters/LineBlockCharacters.h"
 #include "../filterHotSpots/FilterChain.h"
 #include "../session/SessionManager.h"
@@ -366,6 +367,7 @@ void TerminalPainter::drawContents(Character *image,
                           background,
                           y,
                           sixelRegion);
+            drawImagePlaceholders(paint, image + pos, rect.x(), right, QPoint(leftPadding, textY), fontWidth, fontHeight);
         }
 
         RenditionFlags oldRendition = -1;
@@ -386,6 +388,9 @@ void TerminalPainter::drawContents(Character *image,
             const bool doubleWidth = image[qMin(pos + log_x + 1, imageSize - 1)].isRightHalfOfDoubleWide(); // East_Asian_Width wide character
 
             if (!drawFlags.testFlag(DrawFlag::PrinterFriendly) && lastCharType == 0 && char_value.isSpace() && char_value.rendition.f.cursor == 0) {
+                continue;
+            }
+            if (char_value.baseCodePoint() == KittyPlaceholderChar) {
                 continue;
             }
 
@@ -1132,6 +1137,39 @@ void TerminalPainter::drawImagesAboveText(QPainter &painter, const QRect &rect, 
         painter.setOpacity(opacity);
         painter.setClipRegion(origClipRegion);
         painter.setClipping(origClipping);
+    }
+}
+
+void TerminalPainter::drawImagePlaceholders(QPainter &painter, const Character *line, int left, int right, QPoint origin, int fontWidth, int fontHeight)
+{
+    auto &placements = m_parentDisplay->screenWindow()->screen()->virtualPlacements();
+    if (placements.isEmpty()) {
+        return;
+    }
+    const qreal dpr = painter.device()->devicePixelRatioF();
+    KittyPlaceholder cell;
+    // Omitted diacritics are inherited from the left, so decode from the start of the line
+    for (int x = 0; x <= right; x++) {
+        cell = KittyPlaceholder::decode(line[x], cell);
+        const auto it = cell.imageId != 0 && x >= left ? placements.find(cell.imageId) : placements.end();
+        if (it == placements.end() || cell.row >= it->rows || cell.column >= it->cols) {
+            continue;
+        }
+        // Fit the image into its box of cells preserving the aspect ratio, centered, in device pixels
+        const QSize box = QSize(it->cols * fontWidth, it->rows * fontHeight) * dpr;
+        if (it->box != box) {
+            const QSize fitted = it->image.size().scaled(box, Qt::KeepAspectRatio);
+            it->box = box;
+            it->offset = QPoint((box.width() - fitted.width()) / 2, (box.height() - fitted.height()) / 2);
+            it->fitted = QPixmap::fromImage(it->image.scaled(fitted, Qt::IgnoreAspectRatio, Qt::SmoothTransformation));
+        }
+        const QRectF cellRect(QPointF(cell.column * fontWidth, cell.row * fontHeight) * dpr, QSizeF(fontWidth, fontHeight) * dpr);
+        const QRectF source = cellRect.intersected(QRectF(it->offset, it->fitted.size()));
+        if (source.isEmpty()) {
+            continue;
+        }
+        const QPointF target = QPointF(origin + QPoint(x * fontWidth, 0)) + (source.topLeft() - cellRect.topLeft()) / dpr;
+        painter.drawPixmap(QRectF(target, source.size() / dpr), it->fitted, source.translated(-it->offset));
     }
 }
 

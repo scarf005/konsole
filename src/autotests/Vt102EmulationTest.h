@@ -47,6 +47,7 @@ private Q_SLOTS:
     void testKittyGraphicsQuery();
     void testKittyGraphicsMalformed();
     void testKittyGraphicsMediums();
+    void testKittyGraphicsVirtualPlacement();
 
 private:
     static void sendAndCompare(TestEmulation *em, const char *input, size_t inputLen, const QString &expectedPrint, const QByteArray &expectedSent);
