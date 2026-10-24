@@ -865,6 +865,13 @@ void Vt102EmulationTest::testKittyGraphicsMediums()
     QCOMPARE(em.lastSent, QByteArray("\033_Gi=8;EINVAL:Not a regular file\033\\"));
     send("a=t,t=f,f=24,s=1,v=1,i=8,O=7", path);
     QCOMPARE(em.lastSent, QByteArray("\033_Gi=8;EINVAL:Invalid size or offset\033\\"));
+    const QByteArray sparse = QFile::encodeName(dir.filePath(QStringLiteral("sparse")));
+    QFile sparseFile(QFile::decodeName(sparse));
+    QVERIFY(sparseFile.open(QIODevice::WriteOnly));
+    QVERIFY(sparseFile.resize(401 * 1024 * 1024));
+    sparseFile.close();
+    send("a=t,t=f,f=100,i=8", sparse);
+    QCOMPARE(em.lastSent, QByteArray("\033_Gi=8;EFBIG:Image data too large\033\\"));
     send("a=t,t=x,f=24,s=1,v=1,i=8", path);
     QCOMPARE(em.lastSent, QByteArray("\033_Gi=8;EINVAL:Unknown transmission medium\033\\"));
     send("a=t,t=f,f=24,s=1,v=1,i=8,q=2", path + "-missing");
@@ -957,6 +964,37 @@ void Vt102EmulationTest::testKittyGraphicsVirtualPlacement()
     send("\033_Ga=d,d=I,i=77,q=2\033\\");
     QVERIFY(!em._currentScreen->virtualPlacements().contains(77));
     QVERIFY(!em._graphicsImages.contains(77));
+}
+
+void Vt102EmulationTest::testKittyGraphicsStorageLimit()
+{
+    TestEmulation em;
+    em.reset();
+    em.setCodec(TestEmulation::Utf8Codec);
+
+    // 64 MB images, zlib compressed for transmission
+    const QByteArray payload = qCompress(QByteArray(4096 * 4096 * 4, 0)).mid(4);
+    for (int id = 1; id <= 6; id++) {
+        const QByteArray keys = "a=T,U=1,q=2,f=32,o=z,s=4096,v=4096,c=10,r=5,i=" + QByteArray::number(id);
+        const QByteArray command = graphicsCommand(keys.constData(), payload);
+        em.receiveData(command.constData(), command.size());
+        QVERIFY(em._graphicsImages.contains(id));
+    }
+    // 6 * 64 MB exceed the 320 MB limit, the oldest image and its placement are evicted
+    QVERIFY(!em._graphicsImages.contains(1));
+    QVERIFY(!em._currentScreen->virtualPlacements().contains(1));
+    for (int id = 2; id <= 6; id++) {
+        QVERIFY(em._graphicsImages.contains(id));
+        QVERIFY(em._currentScreen->virtualPlacements().contains(id));
+    }
+
+    // Retransmitting an id makes it the newest
+    const QByteArray again = graphicsCommand("a=t,q=2,f=32,o=z,s=4096,v=4096,i=2", payload);
+    em.receiveData(again.constData(), again.size());
+    const QByteArray next = graphicsCommand("a=t,q=2,f=32,o=z,s=4096,v=4096,i=7", payload);
+    em.receiveData(next.constData(), next.size());
+    QVERIFY(em._graphicsImages.contains(2));
+    QVERIFY(!em._graphicsImages.contains(3));
 }
 
 QTEST_GUILESS_MAIN(Vt102EmulationTest)

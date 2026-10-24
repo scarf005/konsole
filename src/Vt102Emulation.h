@@ -265,9 +265,12 @@ protected:
 
     // Kitty graphics
     QHash<quint32, QImage> _graphicsImages;
+    QList<quint32> _graphicsImageOrder; // oldest first
 
 private:
     void processGraphicsToken(int tokenSize);
+    // Stores an image, evicting the oldest ones beyond the storage limit
+    void storeGraphicsImage(quint32 id, const QImage &image);
     void removeVirtualPlacements(quint32 id);
 
     void sendGraphicsReply(const QString &params, const QString &error);
