@@ -263,6 +263,9 @@ protected:
     virtual void processSessionAttributeRequest(const int tokenSize, const uint terminator);
     virtual void processChecksumRequest(int argc, int argv[]);
 
+    // Kitty graphics
+    QHash<quint32, QImage> _graphicsImages;
+
 private:
     void processGraphicsToken(int tokenSize);
 
@@ -364,8 +367,6 @@ private:
     bool m_SixelScrolling = true;
     QSize m_actualSize; // For efficiency reasons, we keep the image in memory larger than what the end result is
 
-    // Kitty graphics
-    QHash<quint32, QImage> _graphicsImages;
     // For kitty graphics protocol - image cache
     int getFreeGraphicsImageId();
 

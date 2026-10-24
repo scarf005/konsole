@@ -16,7 +16,9 @@
 #include <QAudioOutput>
 #include <QBuffer>
 #include <QClipboard>
+#include <QDir>
 #include <QEvent>
+#include <QFileInfo>
 #include <QKeyEvent>
 #include <QTimer>
 #include <QtEndian>
@@ -45,6 +47,13 @@
 #endif
 
 #include <konsoledebug.h>
+
+#ifndef Q_OS_WIN
+#include <fcntl.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#endif
 
 using Konsole::Vt102Emulation;
 
@@ -2412,6 +2421,66 @@ void delete_func(void *p)
     delete (QByteArray *)p;
 }
 
+// Same limit as kitty
+static constexpr qint64 MaxGraphicsDataSize = 400 * 1024 * 1024;
+
+// Replaces the file path or shared memory name in data (t=f, t=t, t=s) with the
+// contents it refers to. Returns an error reply on failure.
+static QString readGraphicsMedium(qint64 medium, qint64 size, qint64 offset, QByteArray &data)
+{
+#ifdef Q_OS_WIN
+    Q_UNUSED(medium)
+    Q_UNUSED(size)
+    Q_UNUSED(offset)
+    Q_UNUSED(data)
+    return QStringLiteral("ENOTSUPPORTED:");
+#else
+    if (medium != 'f' && medium != 't' && medium != 's') {
+        return QStringLiteral("EINVAL:Unknown transmission medium");
+    }
+    const QByteArray name = data;
+    data.clear();
+    // O_NONBLOCK so that opening a FIFO cannot hang the terminal
+    const int fd = medium == 's' ? shm_open(name.constData(), O_RDONLY | O_CLOEXEC, 0) : open(name.constData(), O_RDONLY | O_NONBLOCK | O_CLOEXEC);
+    if (fd < 0) {
+        return QStringLiteral("ENOENT:Failed to open file");
+    }
+    QString error;
+    struct stat st;
+    if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode)) {
+        error = QStringLiteral("EINVAL:Not a regular file");
+    } else if (size < 0 || offset < 0 || offset > st.st_size) {
+        error = QStringLiteral("EINVAL:Invalid size or offset");
+    } else {
+        const qint64 length = size ? qMin<qint64>(size, st.st_size - offset) : st.st_size - offset;
+        if (length > MaxGraphicsDataSize) {
+            error = QStringLiteral("EFBIG:Image data too large");
+        } else {
+            data.resize(length);
+            if (pread(fd, data.data(), length, offset) != length) {
+                data.clear();
+                error = QStringLiteral("EIO:Failed to read image data");
+            }
+        }
+    }
+    close(fd);
+    if (medium == 's') {
+        shm_unlink(name.constData());
+    } else if (medium == 't' && name.contains("tty-graphics-protocol")) {
+        // Like kitty, only delete files in temporary directories
+        const QString dir = QFileInfo(QFile::decodeName(name)).canonicalPath() + QLatin1Char('/');
+        for (const QString &tmp : {QDir::tempPath(), QStringLiteral("/tmp"), QStringLiteral("/dev/shm")}) {
+            const QString canonicalTmp = QDir(tmp).canonicalPath();
+            if (!canonicalTmp.isEmpty() && dir.startsWith(canonicalTmp + QLatin1Char('/'))) {
+                unlink(name.constData());
+                break;
+            }
+        }
+    }
+    return error;
+#endif
+}
+
 void Vt102Emulation::processGraphicsToken(int tokenSize)
 {
     QString value = QString::fromUcs4(&tokenBuffer[1], tokenSize - 1);
@@ -2475,12 +2544,6 @@ void Vt102Emulation::processGraphicsToken(int tokenSize)
     }
 
     if (keys['a'] == 't' || keys['a'] == 'T' || keys['a'] == 'q') {
-        if (keys['q'] < 2 && keys['t'] != 'd') {
-            QString params = QStringLiteral("i=") + QString::number(keys['i']);
-            QString error = QStringLiteral("ENOTSUPPORTED:");
-            sendGraphicsReply(params, error);
-            return;
-        }
         if (keys['I']) {
             keys['i'] = getFreeGraphicsImageId();
         }
@@ -2495,6 +2558,17 @@ void Vt102Emulation::processGraphicsToken(int tokenSize)
             imageId = 0;
             savedKeys = QMap<char, qint64>();
             QByteArray out;
+
+            if (keys['t'] != 'd') {
+                const QString error = readGraphicsMedium(keys['t'], keys['S'], keys['O'], imageData);
+                if (!error.isEmpty()) {
+                    if (keys['q'] < 2) {
+                        sendGraphicsReply(QStringLiteral("i=") + QString::number(keys['i']), error);
+                    }
+                    imageData.clear();
+                    return;
+                }
+            }
 
             uint32_t byteCount = 0;
             if (keys['f'] == 24 || keys['f'] == 32) {
@@ -2538,7 +2612,7 @@ void Vt102Emulation::processGraphicsToken(int tokenSize)
 
             if (keys['a'] == 'q') {
                 QString params = QStringLiteral("i=") + QString::number(keys['i']);
-                sendGraphicsReply(params, QString());
+                sendGraphicsReply(params, image.isNull() ? QStringLiteral("EINVAL:Failed to decode image") : QString());
             } else {
                 if (keys['i']) {
                     _graphicsImages[keys['i']] = image;
