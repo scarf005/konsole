@@ -9,6 +9,7 @@
 
 // Konsole characters
 #include <ExtendedCharTable.h>
+#include <KittyPlaceholder.h>
 
 // Qt
 #include <QTextStream>
@@ -69,6 +70,10 @@ void HTMLDecoder::decodeLine(const Character *const characters, int count, LineP
     int spaceCount = 0;
 
     for (int i = 0; i < count; i++) {
+        // kitty graphics image placeholders are not text
+        if (characters[i].baseCodePoint() == KittyPlaceholderChar) {
+            continue;
+        }
         // check if appearance of character is different from previous char
         if (characters[i].rendition.all != _lastRendition || characters[i].foregroundColor != _lastForeColor
             || characters[i].backgroundColor != _lastBackColor) {

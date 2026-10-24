@@ -7,6 +7,7 @@
 // Own
 #include "Vt102EmulationTest.h"
 
+#include <QBuffer>
 #include <QSignalSpy>
 #include <QTemporaryDir>
 #include <QTest>
@@ -893,6 +894,69 @@ void Vt102EmulationTest::testKittyGraphicsMediums()
     QCOMPARE(shm_open(shmName.constData(), O_RDONLY, 0), -1);
     send("a=t,t=s,f=24,s=1,v=1,i=12", shmName);
     QCOMPARE(em.lastSent, QByteArray("\033_Gi=12;ENOENT:Failed to open file\033\\"));
+}
+
+void Vt102EmulationTest::testKittyGraphicsVirtualPlacement()
+{
+    TestEmulation em;
+    em.reset();
+    em.setCodec(TestEmulation::Utf8Codec);
+    auto send = [&em](const QByteArray &command) {
+        em.lastSent.clear();
+        em.receiveData(command.constData(), command.size());
+    };
+
+    // A PNG large enough to need several 4096 byte chunks, sent like Claude Code does
+    QImage source(200, 100, QImage::Format_RGB32);
+    for (int y = 0; y < source.height(); y++) {
+        for (int x = 0; x < source.width(); x++) {
+            source.setPixel(x, y, 0xFF000000 | ((x * 7919 + y * 104729) * 2654435761u >> 8));
+        }
+    }
+    QByteArray png;
+    QBuffer buffer(&png);
+    buffer.open(QIODevice::WriteOnly);
+    QVERIFY(source.save(&buffer, "PNG"));
+    const QByteArray base64 = png.toBase64();
+    QVERIFY(base64.size() > 2 * 4096);
+    for (qsizetype pos = 0; pos < base64.size(); pos += 4096) {
+        const bool last = pos + 4096 >= base64.size();
+        const QByteArray keys = pos == 0 ? "a=T,U=1,q=2,f=100,i=77,c=10,r=5," : "q=2,";
+        send("\033_G" + keys + (last ? "m=0" : "m=1") + ';' + base64.mid(pos, 4096) + "\033\\");
+    }
+    QCOMPARE(em.lastSent, QByteArray());
+    QCOMPARE(em._graphicsImages.value(77), source);
+    for (Screen *screen : em._screen) {
+        QVERIFY(screen->virtualPlacements().contains(77));
+        QCOMPARE(screen->virtualPlacements()[77].image, source);
+        QCOMPARE(screen->virtualPlacements()[77].cols, 10);
+        QCOMPARE(screen->virtualPlacements()[77].rows, 5);
+        QVERIFY(screen->hasGraphics());
+    }
+    // A virtual placement does not move the cursor or create a real placement
+    QCOMPARE(em._currentScreen->getCursorX(), 0);
+    QCOMPARE(em._currentScreen->getGraphicsPlacement(0), nullptr);
+
+    // a=p creates a virtual placement of a stored image
+    send(graphicsCommand("a=t,f=24,s=1,v=1,i=78,q=2", QByteArray(3, 0)));
+    send("\033_Ga=p,U=1,i=78,c=3,r=2\033\\");
+    QCOMPARE(em.lastSent, QByteArray("\033_Gi=78;OK\033\\"));
+    QCOMPARE(em._currentScreen->virtualPlacements()[78].cols, 3);
+
+    // Retransmitting an id replaces the image and drops its placements
+    send(graphicsCommand("a=t,f=24,s=1,v=1,i=78,q=2", QByteArray(3, 0)));
+    QVERIFY(!em._currentScreen->virtualPlacements().contains(78));
+
+    // d=i deletes the virtual placement, d=I also the image
+    send("\033_Ga=d,d=i,i=77,q=2\033\\");
+    QVERIFY(!em._screen[0]->virtualPlacements().contains(77));
+    QVERIFY(!em._screen[1]->virtualPlacements().contains(77));
+    QVERIFY(em._graphicsImages.contains(77));
+    send("\033_Ga=p,U=1,i=77,c=10,r=5,q=2\033\\");
+    QVERIFY(em._currentScreen->virtualPlacements().contains(77));
+    send("\033_Ga=d,d=I,i=77,q=2\033\\");
+    QVERIFY(!em._currentScreen->virtualPlacements().contains(77));
+    QVERIFY(!em._graphicsImages.contains(77));
 }
 
 QTEST_GUILESS_MAIN(Vt102EmulationTest)

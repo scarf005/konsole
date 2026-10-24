@@ -9,6 +9,7 @@
 
 // Konsole characters
 #include <ExtendedCharTable.h>
+#include <KittyPlaceholder.h>
 
 // Qt
 #include <QList>
@@ -84,7 +85,10 @@ void PlainTextDecoder::decodeLine(const Character *const characters, int count, 
     characterBuffer.reserve(count);
 
     for (int i = start; i < outputCount;) {
-        if (characters[i].rendition.f.extended != 0) {
+        if (characters[i].baseCodePoint() == KittyPlaceholderChar) {
+            // kitty graphics image placeholders are not text
+            ++i;
+        } else if (characters[i].rendition.f.extended != 0) {
             ushort extendedCharLength = 0;
             const char32_t *chars = ExtendedCharTable::instance.lookupExtendedChar(characters[i].character, extendedCharLength);
             if (chars != nullptr) {
