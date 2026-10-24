@@ -12,10 +12,12 @@
 #include <QTemporaryDir>
 #include <QTest>
 
+#ifndef Q_OS_WIN
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#endif
 
 // The below is to verify the old #defines match the new constexprs
 // Just copy/paste for now from Vt102Emulation.cpp
@@ -822,6 +824,9 @@ static QByteArray graphicsCommand(const char *keys, const QByteArray &payload)
 
 void Vt102EmulationTest::testKittyGraphicsMediums()
 {
+#ifdef Q_OS_WIN
+    QSKIP("File and shared memory transmission is not supported on Windows");
+#else
     TestEmulation em;
     em.reset();
     em.setCodec(TestEmulation::Utf8Codec);
@@ -901,6 +906,7 @@ void Vt102EmulationTest::testKittyGraphicsMediums()
     QCOMPARE(shm_open(shmName.constData(), O_RDONLY, 0), -1);
     send("a=t,t=s,f=24,s=1,v=1,i=12", shmName);
     QCOMPARE(em.lastSent, QByteArray("\033_Gi=12;ENOENT:Failed to open file\033\\"));
+#endif
 }
 
 void Vt102EmulationTest::testKittyGraphicsVirtualPlacement()
