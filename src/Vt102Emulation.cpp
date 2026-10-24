@@ -57,6 +57,10 @@
 
 using Konsole::Vt102Emulation;
 
+// Same limits as kitty: data of one kitty graphics image, all stored images
+static constexpr qint64 MaxGraphicsDataSize = 400 * 1024 * 1024;
+static constexpr qint64 MaxGraphicsStorageSize = 320 * 1024 * 1024;
+
 /*
    The VT100 has 32 special graphical characters. The usual vt100 extended
    xterm fonts have these at 0x00..0x1f.
@@ -154,6 +158,7 @@ void Vt102Emulation::clearEntireScreen()
 void Vt102Emulation::clearHistory()
 {
     _graphicsImages.clear();
+    _graphicsImageOrder.clear();
 
     Emulation::clearHistory();
 }
@@ -754,7 +759,10 @@ void Vt102Emulation::apc_put(const uint cc)
             }
         } else if (tokenState == -2) {
             if (tokenBufferPos - tokenPos == 4) {
-                tokenData.append(QByteArray::fromBase64(QString::fromUcs4(&tokenBuffer[tokenPos], 4).toLocal8Bit()));
+                // Beyond the limit the command fails anyway, see processGraphicsToken()
+                if (tokenData.size() <= MaxGraphicsDataSize) {
+                    tokenData.append(QByteArray::fromBase64(QString::fromUcs4(&tokenBuffer[tokenPos], 4).toLocal8Bit()));
+                }
                 tokenBufferPos -= 4;
             }
         }
@@ -2421,9 +2429,6 @@ void delete_func(void *p)
     delete (QByteArray *)p;
 }
 
-// Same limit as kitty
-static constexpr qint64 MaxGraphicsDataSize = 400 * 1024 * 1024;
-
 // Replaces the file path or shared memory name in data (t=f, t=t, t=s) with the
 // contents it refers to. Returns an error reply on failure.
 static QString readGraphicsMedium(qint64 medium, qint64 size, qint64 offset, QByteArray &data)
@@ -2554,6 +2559,15 @@ void Vt102Emulation::processGraphicsToken(int tokenSize)
         imageData.append(tokenData);
         tokenData.clear();
         imageData.append(QByteArray::fromBase64(value.mid(dataPos + 1).toLocal8Bit()));
+        if (imageData.size() > MaxGraphicsDataSize) {
+            if (keys['q'] < 2) {
+                sendGraphicsReply(QStringLiteral("i=") + QString::number(keys['i']), QStringLiteral("EFBIG:Image data too large"));
+            }
+            imageId = 0;
+            imageData.clear();
+            savedKeys = QMap<char, qint64>();
+            return;
+        }
         if (keys['m'] == 0) {
             imageId = 0;
             savedKeys = QMap<char, qint64>();
@@ -2615,8 +2629,7 @@ void Vt102Emulation::processGraphicsToken(int tokenSize)
                 sendGraphicsReply(params, image.isNull() ? QStringLiteral("EINVAL:Failed to decode image") : QString());
             } else {
                 if (keys['i']) {
-                    removeVirtualPlacements(keys['i']);
-                    _graphicsImages[keys['i']] = image;
+                    storeGraphicsImage(keys['i'], image);
                 }
                 if (keys['q'] == 0 && keys['a'] == 't') {
                     QString params = QStringLiteral("i=") + QString::number(keys['i']);
@@ -2710,8 +2723,26 @@ void Vt102Emulation::processGraphicsToken(int tokenSize)
             removeVirtualPlacements(id);
             if (keys['d'] == 'I') {
                 _graphicsImages.remove(id);
+                _graphicsImageOrder.removeOne(id);
             }
         }
+    }
+}
+
+void Vt102Emulation::storeGraphicsImage(quint32 id, const QImage &image)
+{
+    removeVirtualPlacements(id);
+    _graphicsImageOrder.removeOne(id);
+    _graphicsImages[id] = image;
+    _graphicsImageOrder.append(id);
+    qint64 total = 0;
+    for (const QImage &stored : std::as_const(_graphicsImages)) {
+        total += stored.sizeInBytes();
+    }
+    while (total > MaxGraphicsStorageSize && _graphicsImageOrder.size() > 1) {
+        const quint32 oldest = _graphicsImageOrder.takeFirst();
+        total -= _graphicsImages.take(oldest).sizeInBytes();
+        removeVirtualPlacements(oldest);
     }
 }
 
