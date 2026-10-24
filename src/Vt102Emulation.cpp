@@ -754,7 +754,7 @@ void Vt102Emulation::apc_put(const uint cc)
 
 void Vt102Emulation::apc_end()
 {
-    if (_sosPmApc == Apc && tokenBuffer[0] == 'G') {
+    if (_sosPmApc == Apc && tokenBufferPos > 0 && tokenBuffer[0] == 'G') {
         // Graphics command
         processGraphicsToken(tokenBufferPos);
         resetTokenizer();
@@ -2454,15 +2454,23 @@ void Vt102Emulation::processGraphicsToken(int tokenSize)
         keys = QMap<char, qint64>(savedKeys);
     }
 
-    for (int i = 0; i < list.size(); i++) {
-        if (list.at(i).at(1).toLatin1() != '=') {
+    for (const QString &item : std::as_const(list)) {
+        if (item.isEmpty()) {
+            continue;
+        }
+        if (item.size() < 3 || item.at(1) != QLatin1Char('=')) {
             reportDecodingError(token_apc('G'));
             return;
         }
-        if (list.at(i).at(2).isNumber() || list.at(i).at(2).toLatin1() == '-') {
-            keys[list.at(i).at(0).toLatin1()] = QStringView(list.at(i)).mid(2).toInt();
+        if (item.at(2).isNumber() || item.at(2) == QLatin1Char('-')) {
+            bool ok = false;
+            keys[item.at(0).toLatin1()] = QStringView(item).mid(2).toLongLong(&ok);
+            if (!ok) {
+                reportDecodingError(token_apc('G'));
+                return;
+            }
         } else {
-            keys[list.at(i).at(0).toLatin1()] = list.at(i).at(2).toLatin1();
+            keys[item.at(0).toLatin1()] = item.at(2).toLatin1();
         }
     }
 
