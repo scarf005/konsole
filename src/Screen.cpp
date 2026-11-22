@@ -2492,7 +2492,9 @@ void Screen::setScroll(const HistoryType &t, bool copyPreviousScroll)
         // As 't' can be '_history' pointer, move it to a temporary smart pointer
         // making _history = nullptr
         auto oldHistory = std::move(_history);
-        currentTerminalDisplay()->removeLines(oldHistory->getLines());
+        if (TerminalDisplay *display = currentTerminalDisplay()) {
+            display->removeLines(oldHistory->getLines());
+        }
         t.scroll(_history);
     }
     _graphicsPlacements.clear();

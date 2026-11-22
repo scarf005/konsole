@@ -11,6 +11,7 @@
 
 // Konsole
 #include "../Screen.h"
+#include "../characters/KittyPlaceholder.h"
 #include "../characters/LineBlockCharacters.h"
 #include "../filterHotSpots/FilterChain.h"
 #include "../session/SessionManager.h"
@@ -366,6 +367,7 @@ void TerminalPainter::drawContents(Character *image,
                           background,
                           y,
                           sixelRegion);
+            drawImagePlaceholders(paint, image + pos, rect.x(), right, QPoint(leftPadding, textY), fontWidth, fontHeight);
         }
 
         RenditionFlags oldRendition = -1;
@@ -386,6 +388,9 @@ void TerminalPainter::drawContents(Character *image,
             const bool doubleWidth = image[qMin(pos + log_x + 1, imageSize - 1)].isRightHalfOfDoubleWide(); // East_Asian_Width wide character
 
             if (!drawFlags.testFlag(DrawFlag::PrinterFriendly) && lastCharType == 0 && char_value.isSpace() && char_value.rendition.f.cursor == 0) {
+                continue;
+            }
+            if (char_value.baseCodePoint() == KittyPlaceholderChar) {
                 continue;
             }
 
@@ -1133,6 +1138,46 @@ void TerminalPainter::drawImagesAboveText(QPainter &painter, const QRect &rect, 
         painter.setClipRegion(origClipRegion);
         painter.setClipping(origClipping);
     }
+}
+
+void TerminalPainter::drawImagePlaceholders(QPainter &painter, const Character *line, int left, int right, QPoint origin, int fontWidth, int fontHeight)
+{
+    auto &placements = m_parentDisplay->screenWindow()->screen()->virtualPlacements();
+    if (placements.isEmpty()) {
+        return;
+    }
+    const bool smooth = painter.testRenderHint(QPainter::SmoothPixmapTransform);
+    painter.setRenderHint(QPainter::SmoothPixmapTransform);
+    KittyPlaceholder cell;
+    // Omitted diacritics are inherited from the left, so decode from the start of the line
+    for (int x = 0; x <= right; x++) {
+        cell = KittyPlaceholder::decode(line[x], cell);
+        const auto it = cell.imageId != 0 && x >= left ? placements.find(cell.imageId) : placements.end();
+        if (it == placements.end() || cell.row >= it->rows || cell.column >= it->cols) {
+            continue;
+        }
+        // Fit the image into its box of cells preserving the aspect ratio, centered
+        const QSizeF box(it->cols * fontWidth, it->rows * fontHeight);
+        const QSizeF fitted = QSizeF(it->image.size()).scaled(box, Qt::KeepAspectRatio);
+        const QRectF fittedRect(QPointF((box.width() - fitted.width()) / 2, (box.height() - fitted.height()) / 2), fitted);
+        const QRectF cellRect(cell.column * fontWidth, cell.row * fontHeight, fontWidth, fontHeight);
+        const QRectF target = cellRect.intersected(fittedRect);
+        if (target.isEmpty()) {
+            continue;
+        }
+        // Cache a smoothly shrunk copy, never larger than the image. Enlarge while painting,
+        // so a small image in a large box keeps no box-sized copy.
+        const QSize device = (fitted * painter.device()->devicePixelRatioF()).toSize();
+        const bool shrink = device.width() < it->image.width();
+        if (shrink && it->shrunk.size() != device) {
+            it->shrunk = it->image.scaled(device, Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
+        }
+        const QImage &image = shrink ? it->shrunk : it->image;
+        const qreal scale = image.width() / fitted.width();
+        const QRectF source((target.topLeft() - fittedRect.topLeft()) * scale, target.size() * scale);
+        painter.drawImage(target.translated(QPointF(origin + QPoint(x * fontWidth, 0)) - cellRect.topLeft()), image, source);
+    }
+    painter.setRenderHint(QPainter::SmoothPixmapTransform, smooth);
 }
 
 void TerminalPainter::drawTextCharacters(QPainter &painter,

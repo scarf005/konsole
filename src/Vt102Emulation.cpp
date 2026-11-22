@@ -16,7 +16,9 @@
 #include <QAudioOutput>
 #include <QBuffer>
 #include <QClipboard>
+#include <QDir>
 #include <QEvent>
+#include <QFileInfo>
 #include <QKeyEvent>
 #include <QTimer>
 #include <QtEndian>
@@ -47,7 +49,18 @@
 
 #include <konsoledebug.h>
 
+#ifndef Q_OS_WIN
+#include <fcntl.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#endif
+
 using Konsole::Vt102Emulation;
+
+// Same limits as kitty: data of one kitty graphics image, all stored images
+static constexpr qint64 MaxGraphicsDataSize = 400 * 1024 * 1024;
+static constexpr qint64 MaxGraphicsStorageSize = 320 * 1024 * 1024;
 
 /*
    The VT100 has 32 special graphical characters. The usual vt100 extended
@@ -146,6 +159,10 @@ void Vt102Emulation::clearEntireScreen()
 void Vt102Emulation::clearHistory()
 {
     _graphicsImages.clear();
+    _graphicsImageOrder.clear();
+    for (Screen *screen : _screen) {
+        screen->virtualPlacements().clear();
+    }
 
     Emulation::clearHistory();
 }
@@ -746,7 +763,10 @@ void Vt102Emulation::apc_put(const uint cc)
             }
         } else if (tokenState == -2) {
             if (tokenBufferPos - tokenPos == 4) {
-                tokenData.append(QByteArray::fromBase64(QString::fromUcs4(&tokenBuffer[tokenPos], 4).toLocal8Bit()));
+                // Beyond the limit the command fails anyway, see processGraphicsToken()
+                if (tokenData.size() <= MaxGraphicsDataSize) {
+                    tokenData.append(QByteArray::fromBase64(QString::fromUcs4(&tokenBuffer[tokenPos], 4).toLocal8Bit()));
+                }
                 tokenBufferPos -= 4;
             }
         }
@@ -755,7 +775,7 @@ void Vt102Emulation::apc_put(const uint cc)
 
 void Vt102Emulation::apc_end()
 {
-    if (_sosPmApc == Apc && tokenBuffer[0] == 'G') {
+    if (_sosPmApc == Apc && tokenBufferPos > 0 && tokenBuffer[0] == 'G') {
         // Graphics command
         processGraphicsToken(tokenBufferPos);
         resetTokenizer();
@@ -2408,11 +2428,72 @@ void delete_func(void *p)
     delete (QByteArray *)p;
 }
 
+// Replaces the file path or shared memory name in data (t=f, t=t, t=s) with the
+// contents it refers to. Returns an error reply on failure.
+static QString readGraphicsMedium(qint64 medium, qint64 size, qint64 offset, QByteArray &data)
+{
+#ifdef Q_OS_WIN
+    Q_UNUSED(medium)
+    Q_UNUSED(size)
+    Q_UNUSED(offset)
+    Q_UNUSED(data)
+    return QStringLiteral("ENOTSUPPORTED:");
+#else
+    if (medium != 'f' && medium != 't' && medium != 's') {
+        return QStringLiteral("EINVAL:Unknown transmission medium");
+    }
+    const QByteArray name = data;
+    data.clear();
+    struct stat st;
+    // Do not open devices: opening one can have side effects
+    if (medium != 's' && stat(name.constData(), &st) == 0 && !S_ISREG(st.st_mode)) {
+        return QStringLiteral("EINVAL:Not a regular file");
+    }
+    // O_NONBLOCK so that opening a FIFO cannot hang the terminal
+    const int fd = medium == 's' ? shm_open(name.constData(), O_RDONLY | O_CLOEXEC, 0) : open(name.constData(), O_RDONLY | O_NONBLOCK | O_CLOEXEC);
+    if (fd < 0) {
+        return QStringLiteral("ENOENT:Failed to open file");
+    }
+    QString error;
+    if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode)) {
+        error = QStringLiteral("EINVAL:Not a regular file");
+    } else if (size < 0 || offset < 0 || offset > st.st_size) {
+        error = QStringLiteral("EINVAL:Invalid size or offset");
+    } else {
+        const qint64 length = size ? qMin<qint64>(size, st.st_size - offset) : st.st_size - offset;
+        if (length > MaxGraphicsDataSize) {
+            error = QStringLiteral("EFBIG:Image data too large");
+        } else {
+            data.resize(length);
+            if (pread(fd, data.data(), length, offset) != length) {
+                data.clear();
+                error = QStringLiteral("EIO:Failed to read image data");
+            }
+        }
+    }
+    close(fd);
+    if (medium == 's') {
+        shm_unlink(name.constData());
+    } else if (medium == 't' && name.contains("tty-graphics-protocol")) {
+        // Like kitty, only delete files in temporary directories
+        const QString dir = QFileInfo(QFile::decodeName(name)).canonicalPath() + QLatin1Char('/');
+        for (const QString &tmp : {QDir::tempPath(), QStringLiteral("/tmp"), QStringLiteral("/dev/shm")}) {
+            const QString canonicalTmp = QDir(tmp).canonicalPath();
+            if (!canonicalTmp.isEmpty() && dir.startsWith(canonicalTmp + QLatin1Char('/'))) {
+                unlink(name.constData());
+                break;
+            }
+        }
+    }
+    return error;
+#endif
+}
+
 void Vt102Emulation::processGraphicsToken(int tokenSize)
 {
     QString value = QString::fromUcs4(&tokenBuffer[1], tokenSize - 1);
     QStringList list;
-    QPixmap pixmap;
+    QImage image;
 
     int dataPos = value.indexOf(QLatin1Char(';'));
     if (dataPos == -1) {
@@ -2450,25 +2531,30 @@ void Vt102Emulation::processGraphicsToken(int tokenSize)
         keys = QMap<char, qint64>(savedKeys);
     }
 
-    for (int i = 0; i < list.size(); i++) {
-        if (list.at(i).at(1).toLatin1() != '=') {
+    for (const QString &item : std::as_const(list)) {
+        if (item.isEmpty()) {
+            continue;
+        }
+        if (item.size() < 3 || item.at(1) != QLatin1Char('=')) {
             reportDecodingError(token_apc('G'));
             return;
         }
-        if (list.at(i).at(2).isNumber() || list.at(i).at(2).toLatin1() == '-') {
-            keys[list.at(i).at(0).toLatin1()] = QStringView(list.at(i)).mid(2).toInt();
+        if (item.at(2).isNumber() || item.at(2) == QLatin1Char('-')) {
+            bool ok = false;
+            const qint64 number = QStringView(item).mid(2).toLongLong(&ok);
+            // Keys are 32 bit integers, ids are unsigned
+            const bool isId = item.at(0) == QLatin1Char('i') || item.at(0) == QLatin1Char('I');
+            if (!ok || number > std::numeric_limits<quint32>::max() || number < (isId ? 0 : std::numeric_limits<qint32>::min())) {
+                reportDecodingError(token_apc('G'));
+                return;
+            }
+            keys[item.at(0).toLatin1()] = number;
         } else {
-            keys[list.at(i).at(0).toLatin1()] = list.at(i).at(2).toLatin1();
+            keys[item.at(0).toLatin1()] = item.at(2).toLatin1();
         }
     }
 
     if (keys['a'] == 't' || keys['a'] == 'T' || keys['a'] == 'q') {
-        if (keys['q'] < 2 && keys['t'] != 'd') {
-            QString params = QStringLiteral("i=") + QString::number(keys['i']);
-            QString error = QStringLiteral("ENOTSUPPORTED:");
-            sendGraphicsReply(params, error);
-            return;
-        }
         if (keys['I']) {
             keys['i'] = getFreeGraphicsImageId();
         }
@@ -2479,10 +2565,30 @@ void Vt102Emulation::processGraphicsToken(int tokenSize)
         imageData.append(tokenData);
         tokenData.clear();
         imageData.append(QByteArray::fromBase64(value.mid(dataPos + 1).toLocal8Bit()));
+        if (imageData.size() > MaxGraphicsDataSize) {
+            if (keys['q'] < 2) {
+                sendGraphicsReply(QStringLiteral("i=") + QString::number(keys['i']), QStringLiteral("EFBIG:Image data too large"));
+            }
+            imageId = 0;
+            imageData.clear();
+            savedKeys = QMap<char, qint64>();
+            return;
+        }
         if (keys['m'] == 0) {
             imageId = 0;
             savedKeys = QMap<char, qint64>();
             QByteArray out;
+
+            if (keys['t'] != 'd') {
+                const QString error = readGraphicsMedium(keys['t'], keys['S'], keys['O'], imageData);
+                if (!error.isEmpty()) {
+                    if (keys['q'] < 2) {
+                        sendGraphicsReply(QStringLiteral("i=") + QString::number(keys['i']), error);
+                    }
+                    imageData.clear();
+                    return;
+                }
+            }
 
             uint32_t byteCount = 0;
             if (keys['f'] == 24 || keys['f'] == 32) {
@@ -2519,18 +2625,17 @@ void Vt102Emulation::processGraphicsToken(int tokenSize)
                     return;
                 }
                 QImage::Format format = keys['f'] == 24 ? QImage::Format_RGB888 : QImage::Format_RGBA8888;
-                pixmap = QPixmap::fromImage(QImage((const uchar *)out.constData(), 0 + keys['s'], 0 + keys['v'], 0 + keys['s'] * keys['f'] / 8, format));
-                pixmap.detach();
+                image = QImage((const uchar *)out.constData(), 0 + keys['s'], 0 + keys['v'], 0 + keys['s'] * keys['f'] / 8, format).copy();
             } else {
-                pixmap.loadFromData(out);
+                image.loadFromData(out);
             }
 
             if (keys['a'] == 'q') {
                 QString params = QStringLiteral("i=") + QString::number(keys['i']);
-                sendGraphicsReply(params, QString());
+                sendGraphicsReply(params, image.isNull() ? QStringLiteral("EINVAL:Failed to decode image") : QString());
             } else {
                 if (keys['i']) {
-                    _graphicsImages[keys['i']] = pixmap;
+                    storeGraphicsImage(keys['i'], image);
                 }
                 if (keys['q'] == 0 && keys['a'] == 't') {
                     QString params = QStringLiteral("i=") + QString::number(keys['i']);
@@ -2550,34 +2655,46 @@ void Vt102Emulation::processGraphicsToken(int tokenSize)
     }
     if (keys['a'] == 'p' || (keys['a'] == 'T' && keys['m'] == 0)) {
         if (keys['a'] == 'p') {
-            pixmap = _graphicsImages[keys['i']];
+            image = _graphicsImages.value(keys['i']);
         }
-        if (!pixmap.isNull()) {
+        if (!image.isNull()) {
             if (keys['x'] || keys['y'] || keys['w'] || keys['h']) {
-                int w = keys['w'] ? keys['w'] : pixmap.width() - keys['x'];
-                int h = keys['h'] ? keys['h'] : pixmap.height() - keys['y'];
-                pixmap = pixmap.copy(keys['x'], keys['y'], w, h);
+                int w = keys['w'] ? keys['w'] : image.width() - keys['x'];
+                int h = keys['h'] ? keys['h'] : image.height() - keys['y'];
+                image = image.copy(keys['x'], keys['y'], w, h);
             }
-            if (keys['c'] && keys['r']) {
-                pixmap = pixmap.scaled(keys['c'] * _currentScreen->currentTerminalDisplay()->terminalFont()->fontWidth(),
-                                       keys['r'] * _currentScreen->currentTerminalDisplay()->terminalFont()->fontHeight());
+            if (keys['U'] == 1 && keys['i'] > 0) {
+                // Displayed by placeholder cells, see TerminalPainter::drawImagePlaceholders()
+                const TerminalDisplay *display = _currentScreen->currentTerminalDisplay();
+                const int fontWidth = display ? display->terminalFont()->fontWidth() : 1;
+                const int fontHeight = display ? display->terminalFont()->fontHeight() : 1;
+                const int cols = keys['c'] > 0 ? qMin<qint64>(keys['c'], 1000) : (image.width() + fontWidth - 1) / fontWidth;
+                const int rows = keys['r'] > 0 ? qMin<qint64>(keys['r'], 1000) : (image.height() + fontHeight - 1) / fontHeight;
+                for (Screen *screen : _screen) {
+                    screen->virtualPlacements()[keys['i']] = TerminalGraphicsVirtualPlacement_t{image, cols, rows, {}};
+                }
+            } else if (keys['U'] != 1 && keys['c'] && keys['r']) {
+                image = image.scaled(keys['c'] * _currentScreen->currentTerminalDisplay()->terminalFont()->fontWidth(),
+                                     keys['r'] * _currentScreen->currentTerminalDisplay()->terminalFont()->fontHeight());
             }
-            int rows = -1, cols = -1;
-            _currentScreen->addPlacement(pixmap,
-                                         rows,
-                                         cols,
-                                         -1,
-                                         -1,
-                                         TerminalGraphicsPlacement_t::Kitty,
-                                         true,
-                                         keys['C'] == 0,
-                                         true,
-                                         keys['z'],
-                                         keys['i'],
-                                         keys['p'],
-                                         keys['A'] / 255.0,
-                                         keys['X'],
-                                         keys['Y']);
+            if (keys['U'] != 1) {
+                int rows = -1, cols = -1;
+                _currentScreen->addPlacement(QPixmap::fromImage(image),
+                                             rows,
+                                             cols,
+                                             -1,
+                                             -1,
+                                             TerminalGraphicsPlacement_t::Kitty,
+                                             true,
+                                             keys['C'] == 0,
+                                             true,
+                                             keys['z'],
+                                             keys['i'],
+                                             keys['p'],
+                                             keys['A'] / 255.0,
+                                             keys['X'],
+                                             keys['Y']);
+            }
             if (keys['q'] == 0 && keys['i']) {
                 QString params = QStringLiteral("i=") + QString::number(keys['i']);
                 if (keys['I']) {
@@ -2597,8 +2714,8 @@ void Vt102Emulation::processGraphicsToken(int tokenSize)
     }
     if (keys['a'] == 'd') {
         int action = keys['d'] | 0x20;
-        int id = keys['i'];
-        int pid = keys['p'];
+        qint64 id = keys['i'];
+        qint64 pid = keys['p'];
         int x = keys['x'];
         int y = keys['y'];
         if (action == 'n') {
@@ -2608,6 +2725,37 @@ void Vt102Emulation::processGraphicsToken(int tokenSize)
             y = _currentScreen->getCursorY();
         }
         _currentScreen->delPlacements(action, id, pid, x, y, keys['z']);
+        if (action == 'i') {
+            removeVirtualPlacements(id);
+            if (keys['d'] == 'I') {
+                _graphicsImages.remove(id);
+                _graphicsImageOrder.removeOne(id);
+            }
+        }
+    }
+}
+
+void Vt102Emulation::storeGraphicsImage(quint32 id, const QImage &image)
+{
+    removeVirtualPlacements(id);
+    _graphicsImageOrder.removeOne(id);
+    _graphicsImages[id] = image;
+    _graphicsImageOrder.append(id);
+    qint64 total = 0;
+    for (const QImage &stored : std::as_const(_graphicsImages)) {
+        total += stored.sizeInBytes();
+    }
+    while (total > MaxGraphicsStorageSize && _graphicsImageOrder.size() > 1) {
+        const quint32 oldest = _graphicsImageOrder.takeFirst();
+        total -= _graphicsImages.take(oldest).sizeInBytes();
+        removeVirtualPlacements(oldest);
+    }
+}
+
+void Vt102Emulation::removeVirtualPlacements(quint32 id)
+{
+    for (Screen *screen : _screen) {
+        screen->virtualPlacements().remove(id);
     }
 }
 

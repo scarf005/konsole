@@ -7,8 +7,19 @@
 // Own
 #include "Vt102EmulationTest.h"
 
+#include <QBuffer>
 #include <QSignalSpy>
+#include <QTemporaryDir>
 #include <QTest>
+
+#ifndef Q_OS_WIN
+#include <fcntl.h>
+#include <sys/mman.h>
+#include <sys/socket.h>
+#include <sys/stat.h>
+#include <sys/un.h>
+#include <unistd.h>
+#endif
 
 // The below is to verify the old #defines match the new constexprs
 // Just copy/paste for now from Vt102Emulation.cpp
@@ -763,6 +774,270 @@ void Vt102EmulationTest::testKittyKeyboardTextKeys()
         em.sendKeyEvent(&space);
         QCOMPARE(em.lastSent, QByteArray("\033[32u"));
     }
+}
+
+void Vt102EmulationTest::testKittyGraphicsQuery()
+{
+    TestEmulation em;
+    em.reset();
+    em.setCodec(TestEmulation::Utf8Codec);
+
+    // Capability probe sent by Claude Code
+    const char query[] = "\033_Gi=31,s=1,v=1,a=q,t=d,f=24;AAAA\033\\";
+    em.receiveData(query, sizeof(query) - 1);
+    QCOMPARE(em.lastSent, QByteArray("\033_Gi=31;OK\033\\"));
+
+    // Image ids are unsigned 32 bit integers
+    em.lastSent.clear();
+    const char bigId[] = "\033_Gi=4294967295,s=1,v=1,a=q,f=24;AAAA\033\\";
+    em.receiveData(bigId, sizeof(bigId) - 1);
+    QCOMPARE(em.lastSent, QByteArray("\033_Gi=4294967295;OK\033\\"));
+}
+
+void Vt102EmulationTest::testKittyGraphicsMalformed()
+{
+    const char *inputs[] = {
+        "\033_G\033\\",
+        "\033_Ga\033\\",
+        "\033_Ga=\033\\",
+        "\033_G=\033\\",
+        "\033_G,,\033\\",
+        "\033_Gi=1x,a=q\033\\",
+        "\033_Gi=99999999999999999999,a=q\033\\",
+        "\033_\033\\",
+        "\033_Ga=q,f=32,s=-1,v=-1;AAAA\033\\",
+        "\033_Ga=p,i=12345\033\\",
+        "\033_Ga=d,d=\033\\",
+    };
+    for (const char *input : inputs) {
+        TestEmulation em;
+        em.reset();
+        em.setCodec(TestEmulation::Utf8Codec);
+        em.receiveData(input, strlen(input));
+        // Parsing continues normally afterwards
+        sendAndCompare(&em, "a", 1, QStringLiteral("a"), em.lastSent);
+    }
+}
+
+static QByteArray graphicsCommand(const char *keys, const QByteArray &payload)
+{
+    return QByteArray("\033_G") + keys + ';' + payload.toBase64() + "\033\\";
+}
+
+void Vt102EmulationTest::testKittyGraphicsMediums()
+{
+#ifdef Q_OS_WIN
+    QSKIP("File and shared memory transmission is not supported on Windows");
+#else
+    TestEmulation em;
+    em.reset();
+    em.setCodec(TestEmulation::Utf8Codec);
+    auto send = [&em](const char *keys, const QByteArray &payload) {
+        em.lastSent.clear();
+        const QByteArray command = graphicsCommand(keys, payload);
+        em.receiveData(command.constData(), command.size());
+    };
+
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QByteArray pixel("\x10\x20\x30\x40\x50\x60", 6);
+    const QByteArray path = QFile::encodeName(dir.filePath(QStringLiteral("pixel.rgb")));
+    QFile file(QFile::decodeName(path));
+    QVERIFY(file.open(QIODevice::WriteOnly));
+    file.write(pixel);
+    file.close();
+
+    // t=f reads the file, S and O select a range of it
+    send("a=t,t=f,f=24,s=1,v=1,i=5", path);
+    QCOMPARE(em.lastSent, QByteArray("\033_Gi=5;OK\033\\"));
+    QCOMPARE(em._graphicsImages.value(5).pixelColor(0, 0), QColor(0x10, 0x20, 0x30));
+    send("a=t,t=f,f=24,s=1,v=1,i=6,O=3,S=3", path);
+    QCOMPARE(em.lastSent, QByteArray("\033_Gi=6;OK\033\\"));
+    QCOMPARE(em._graphicsImages.value(6).pixelColor(0, 0), QColor(0x40, 0x50, 0x60));
+    QVERIFY(file.exists());
+
+    // Capability probe with a file
+    send("a=q,t=f,f=24,s=1,v=1,i=7", path);
+    QCOMPARE(em.lastSent, QByteArray("\033_Gi=7;OK\033\\"));
+    QVERIFY(!em._graphicsImages.contains(7));
+
+    // Errors
+    send("a=t,t=f,f=24,s=1,v=1,i=8", path + "-missing");
+    QCOMPARE(em.lastSent, QByteArray("\033_Gi=8;ENOENT:Failed to open file\033\\"));
+    send("a=t,t=f,f=24,s=1,v=1,i=8", QFile::encodeName(dir.path()));
+    QCOMPARE(em.lastSent, QByteArray("\033_Gi=8;EINVAL:Not a regular file\033\\"));
+    const QByteArray fifo = QFile::encodeName(dir.filePath(QStringLiteral("fifo")));
+    QCOMPARE(mkfifo(fifo.constData(), 0600), 0);
+    send("a=t,t=f,f=24,s=1,v=1,i=8", fifo);
+    QCOMPARE(em.lastSent, QByteArray("\033_Gi=8;EINVAL:Not a regular file\033\\"));
+    // A socket cannot be opened, so EINVAL shows that devices are rejected before open()
+    const QByteArray socketPath = QFile::encodeName(dir.filePath(QStringLiteral("socket")));
+    sockaddr_un address = {};
+    address.sun_family = AF_UNIX;
+    qstrncpy(address.sun_path, socketPath.constData(), sizeof address.sun_path);
+    const int socketFd = socket(AF_UNIX, SOCK_STREAM, 0);
+    QCOMPARE(bind(socketFd, reinterpret_cast<sockaddr *>(&address), sizeof address), 0);
+    send("a=t,t=f,f=24,s=1,v=1,i=8", socketPath);
+    close(socketFd);
+    QCOMPARE(em.lastSent, QByteArray("\033_Gi=8;EINVAL:Not a regular file\033\\"));
+    send("a=t,t=f,f=24,s=1,v=1,i=8,O=7", path);
+    QCOMPARE(em.lastSent, QByteArray("\033_Gi=8;EINVAL:Invalid size or offset\033\\"));
+    const QByteArray sparse = QFile::encodeName(dir.filePath(QStringLiteral("sparse")));
+    QFile sparseFile(QFile::decodeName(sparse));
+    QVERIFY(sparseFile.open(QIODevice::WriteOnly));
+    QVERIFY(sparseFile.resize(401 * 1024 * 1024));
+    sparseFile.close();
+    send("a=t,t=f,f=100,i=8", sparse);
+    QCOMPARE(em.lastSent, QByteArray("\033_Gi=8;EFBIG:Image data too large\033\\"));
+    send("a=t,t=x,f=24,s=1,v=1,i=8", path);
+    QCOMPARE(em.lastSent, QByteArray("\033_Gi=8;EINVAL:Unknown transmission medium\033\\"));
+    send("a=t,t=f,f=24,s=1,v=1,i=8,q=2", path + "-missing");
+    QCOMPARE(em.lastSent, QByteArray());
+    QVERIFY(!em._graphicsImages.contains(8));
+
+    // t=t deletes only files that are marked as temporary
+    send("a=t,t=t,f=24,s=1,v=1,i=9", path);
+    QCOMPARE(em.lastSent, QByteArray("\033_Gi=9;OK\033\\"));
+    QVERIFY(file.exists());
+    const QByteArray tempPath = QFile::encodeName(dir.filePath(QStringLiteral("tty-graphics-protocol-1.rgb")));
+    QVERIFY(QFile::copy(QFile::decodeName(path), QFile::decodeName(tempPath)));
+    send("a=t,t=t,f=24,s=1,v=1,i=10", tempPath);
+    QCOMPARE(em.lastSent, QByteArray("\033_Gi=10;OK\033\\"));
+    QVERIFY(em._graphicsImages.contains(10));
+    QVERIFY(!QFile::exists(QFile::decodeName(tempPath)));
+
+    // t=s reads and unlinks POSIX shared memory
+    const QByteArray shmName = "/konsole-test-" + QByteArray::number(QCoreApplication::applicationPid());
+    int fd = shm_open(shmName.constData(), O_CREAT | O_RDWR | O_EXCL, 0600);
+    QVERIFY(fd >= 0);
+    QCOMPARE(write(fd, pixel.constData(), pixel.size()), pixel.size());
+    close(fd);
+    send("a=t,t=s,f=24,s=1,v=1,i=11", shmName);
+    QCOMPARE(em.lastSent, QByteArray("\033_Gi=11;OK\033\\"));
+    QCOMPARE(em._graphicsImages.value(11).pixelColor(0, 0), QColor(0x10, 0x20, 0x30));
+    QCOMPARE(shm_open(shmName.constData(), O_RDONLY, 0), -1);
+    send("a=t,t=s,f=24,s=1,v=1,i=12", shmName);
+    QCOMPARE(em.lastSent, QByteArray("\033_Gi=12;ENOENT:Failed to open file\033\\"));
+#endif
+}
+
+void Vt102EmulationTest::testKittyGraphicsVirtualPlacement()
+{
+    TestEmulation em;
+    em.reset();
+    em.setCodec(TestEmulation::Utf8Codec);
+    auto send = [&em](const QByteArray &command) {
+        em.lastSent.clear();
+        em.receiveData(command.constData(), command.size());
+    };
+
+    // A PNG large enough to need several 4096 byte chunks, sent like Claude Code does
+    QImage source(200, 100, QImage::Format_RGB32);
+    for (int y = 0; y < source.height(); y++) {
+        for (int x = 0; x < source.width(); x++) {
+            source.setPixel(x, y, 0xFF000000 | ((x * 7919 + y * 104729) * 2654435761u >> 8));
+        }
+    }
+    QByteArray png;
+    QBuffer buffer(&png);
+    buffer.open(QIODevice::WriteOnly);
+    QVERIFY(source.save(&buffer, "PNG"));
+    const QByteArray base64 = png.toBase64();
+    QVERIFY(base64.size() > 2 * 4096);
+    for (qsizetype pos = 0; pos < base64.size(); pos += 4096) {
+        const bool last = pos + 4096 >= base64.size();
+        const QByteArray keys = pos == 0 ? "a=T,U=1,q=2,f=100,i=77,c=10,r=5," : "q=2,";
+        send("\033_G" + keys + (last ? "m=0" : "m=1") + ';' + base64.mid(pos, 4096) + "\033\\");
+    }
+    QCOMPARE(em.lastSent, QByteArray());
+    QCOMPARE(em._graphicsImages.value(77), source);
+    for (Screen *screen : em._screen) {
+        QVERIFY(screen->virtualPlacements().contains(77));
+        QCOMPARE(screen->virtualPlacements()[77].image, source);
+        QCOMPARE(screen->virtualPlacements()[77].cols, 10);
+        QCOMPARE(screen->virtualPlacements()[77].rows, 5);
+        QVERIFY(screen->hasGraphics());
+    }
+    // A virtual placement does not move the cursor or create a real placement
+    QCOMPARE(em._currentScreen->getCursorX(), 0);
+    QCOMPARE(em._currentScreen->getGraphicsPlacement(0), nullptr);
+
+    // a=p creates a virtual placement of a stored image
+    send(graphicsCommand("a=t,f=24,s=1,v=1,i=78,q=2", QByteArray(3, 0)));
+    send("\033_Ga=p,U=1,i=78,c=3,r=2\033\\");
+    QCOMPARE(em.lastSent, QByteArray("\033_Gi=78;OK\033\\"));
+    QCOMPARE(em._currentScreen->virtualPlacements()[78].cols, 3);
+
+    // Retransmitting an id replaces the image and drops its placements
+    send(graphicsCommand("a=t,f=24,s=1,v=1,i=78,q=2", QByteArray(3, 0)));
+    QVERIFY(!em._currentScreen->virtualPlacements().contains(78));
+
+    // d=i deletes the virtual placement, d=I also the image
+    send("\033_Ga=d,d=i,i=77,q=2\033\\");
+    QVERIFY(!em._screen[0]->virtualPlacements().contains(77));
+    QVERIFY(!em._screen[1]->virtualPlacements().contains(77));
+    QVERIFY(em._graphicsImages.contains(77));
+    send("\033_Ga=p,U=1,i=77,c=10,r=5,q=2\033\\");
+    QVERIFY(em._currentScreen->virtualPlacements().contains(77));
+    send("\033_Ga=d,d=I,i=77,q=2\033\\");
+    QVERIFY(!em._currentScreen->virtualPlacements().contains(77));
+    QVERIFY(!em._graphicsImages.contains(77));
+
+    // Clearing the scrollback also drops virtual placements
+    send("\033_Ga=p,U=1,i=78,c=3,r=2,q=2\033\\");
+    QVERIFY(em._currentScreen->virtualPlacements().contains(78));
+    send("\033[3J");
+    QVERIFY(!em._screen[0]->virtualPlacements().contains(78));
+    QVERIFY(!em._screen[1]->virtualPlacements().contains(78));
+}
+
+void Vt102EmulationTest::testKittyGraphicsIdRange()
+{
+    TestEmulation em;
+    em.reset();
+    em.setCodec(TestEmulation::Utf8Codec);
+    auto send = [&em](const char *keys) {
+        const QByteArray command = graphicsCommand(keys, QByteArray(3, 0));
+        em.receiveData(command.constData(), command.size());
+    };
+
+    // i=2^32+1 and i=-1 do not fit an unsigned 32 bit id and are rejected, not truncated to 1 and 2^32-1
+    send("a=t,f=24,s=1,v=1,q=2,i=4294967297");
+    send("a=t,f=24,s=1,v=1,q=2,i=-1");
+    QVERIFY(em._graphicsImages.isEmpty());
+    send("a=t,f=24,s=1,v=1,q=2,i=4294967295");
+    QVERIFY(em._graphicsImages.contains(4294967295u));
+}
+
+void Vt102EmulationTest::testKittyGraphicsStorageLimit()
+{
+    TestEmulation em;
+    em.reset();
+    em.setCodec(TestEmulation::Utf8Codec);
+
+    // 64 MB images, zlib compressed for transmission
+    const QByteArray payload = qCompress(QByteArray(4096 * 4096 * 4, 0)).mid(4);
+    for (int id = 1; id <= 6; id++) {
+        const QByteArray keys = "a=T,U=1,q=2,f=32,o=z,s=4096,v=4096,c=10,r=5,i=" + QByteArray::number(id);
+        const QByteArray command = graphicsCommand(keys.constData(), payload);
+        em.receiveData(command.constData(), command.size());
+        QVERIFY(em._graphicsImages.contains(id));
+    }
+    // 6 * 64 MB exceed the 320 MB limit, the oldest image and its placement are evicted
+    QVERIFY(!em._graphicsImages.contains(1));
+    QVERIFY(!em._currentScreen->virtualPlacements().contains(1));
+    for (int id = 2; id <= 6; id++) {
+        QVERIFY(em._graphicsImages.contains(id));
+        QVERIFY(em._currentScreen->virtualPlacements().contains(id));
+    }
+
+    // Retransmitting an id makes it the newest
+    const QByteArray again = graphicsCommand("a=t,q=2,f=32,o=z,s=4096,v=4096,i=2", payload);
+    em.receiveData(again.constData(), again.size());
+    const QByteArray next = graphicsCommand("a=t,q=2,f=32,o=z,s=4096,v=4096,i=7", payload);
+    em.receiveData(next.constData(), next.size());
+    QVERIFY(em._graphicsImages.contains(2));
+    QVERIFY(!em._graphicsImages.contains(3));
 }
 
 QTEST_GUILESS_MAIN(Vt102EmulationTest)
