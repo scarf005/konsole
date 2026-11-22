@@ -2441,13 +2441,17 @@ static QString readGraphicsMedium(qint64 medium, qint64 size, qint64 offset, QBy
     }
     const QByteArray name = data;
     data.clear();
+    struct stat st;
+    // Do not open devices: opening one can have side effects
+    if (medium != 's' && stat(name.constData(), &st) == 0 && !S_ISREG(st.st_mode)) {
+        return QStringLiteral("EINVAL:Not a regular file");
+    }
     // O_NONBLOCK so that opening a FIFO cannot hang the terminal
     const int fd = medium == 's' ? shm_open(name.constData(), O_RDONLY | O_CLOEXEC, 0) : open(name.constData(), O_RDONLY | O_NONBLOCK | O_CLOEXEC);
     if (fd < 0) {
         return QStringLiteral("ENOENT:Failed to open file");
     }
     QString error;
-    struct stat st;
     if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode)) {
         error = QStringLiteral("EINVAL:Not a regular file");
     } else if (size < 0 || offset < 0 || offset > st.st_size) {
