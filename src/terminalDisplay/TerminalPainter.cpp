@@ -1146,7 +1146,8 @@ void TerminalPainter::drawImagePlaceholders(QPainter &painter, const Character *
     if (placements.isEmpty()) {
         return;
     }
-    const qreal dpr = painter.device()->devicePixelRatioF();
+    const bool smooth = painter.testRenderHint(QPainter::SmoothPixmapTransform);
+    painter.setRenderHint(QPainter::SmoothPixmapTransform);
     KittyPlaceholder cell;
     // Omitted diacritics are inherited from the left, so decode from the start of the line
     for (int x = 0; x <= right; x++) {
@@ -1155,22 +1156,28 @@ void TerminalPainter::drawImagePlaceholders(QPainter &painter, const Character *
         if (it == placements.end() || cell.row >= it->rows || cell.column >= it->cols) {
             continue;
         }
-        // Fit the image into its box of cells preserving the aspect ratio, centered, in device pixels
-        const QSize box = QSize(it->cols * fontWidth, it->rows * fontHeight) * dpr;
-        if (it->box != box) {
-            const QSize fitted = it->image.size().scaled(box, Qt::KeepAspectRatio);
-            it->box = box;
-            it->offset = QPoint((box.width() - fitted.width()) / 2, (box.height() - fitted.height()) / 2);
-            it->fitted = QPixmap::fromImage(it->image.scaled(fitted, Qt::IgnoreAspectRatio, Qt::SmoothTransformation));
-        }
-        const QRectF cellRect(QPointF(cell.column * fontWidth, cell.row * fontHeight) * dpr, QSizeF(fontWidth, fontHeight) * dpr);
-        const QRectF source = cellRect.intersected(QRectF(it->offset, it->fitted.size()));
-        if (source.isEmpty()) {
+        // Fit the image into its box of cells preserving the aspect ratio, centered
+        const QSizeF box(it->cols * fontWidth, it->rows * fontHeight);
+        const QSizeF fitted = QSizeF(it->image.size()).scaled(box, Qt::KeepAspectRatio);
+        const QRectF fittedRect(QPointF((box.width() - fitted.width()) / 2, (box.height() - fitted.height()) / 2), fitted);
+        const QRectF cellRect(cell.column * fontWidth, cell.row * fontHeight, fontWidth, fontHeight);
+        const QRectF target = cellRect.intersected(fittedRect);
+        if (target.isEmpty()) {
             continue;
         }
-        const QPointF target = QPointF(origin + QPoint(x * fontWidth, 0)) + (source.topLeft() - cellRect.topLeft()) / dpr;
-        painter.drawPixmap(QRectF(target, source.size() / dpr), it->fitted, source.translated(-it->offset));
+        // Cache a smoothly shrunk copy, never larger than the image. Enlarge while painting,
+        // so a small image in a large box keeps no box-sized copy.
+        const QSize device = (fitted * painter.device()->devicePixelRatioF()).toSize();
+        const bool shrink = device.width() < it->image.width();
+        if (shrink && it->shrunk.size() != device) {
+            it->shrunk = it->image.scaled(device, Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
+        }
+        const QImage &image = shrink ? it->shrunk : it->image;
+        const qreal scale = image.width() / fitted.width();
+        const QRectF source((target.topLeft() - fittedRect.topLeft()) * scale, target.size() * scale);
+        painter.drawImage(target.translated(QPointF(origin + QPoint(x * fontWidth, 0)) - cellRect.topLeft()), image, source);
     }
+    painter.setRenderHint(QPainter::SmoothPixmapTransform, smooth);
 }
 
 void TerminalPainter::drawTextCharacters(QPainter &painter,

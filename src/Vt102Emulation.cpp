@@ -2671,7 +2671,7 @@ void Vt102Emulation::processGraphicsToken(int tokenSize)
                 const int cols = keys['c'] > 0 ? qMin<qint64>(keys['c'], 1000) : (image.width() + fontWidth - 1) / fontWidth;
                 const int rows = keys['r'] > 0 ? qMin<qint64>(keys['r'], 1000) : (image.height() + fontHeight - 1) / fontHeight;
                 for (Screen *screen : _screen) {
-                    screen->virtualPlacements()[keys['i']] = TerminalGraphicsVirtualPlacement_t{image, cols, rows, {}, {}, {}};
+                    screen->virtualPlacements()[keys['i']] = TerminalGraphicsVirtualPlacement_t{image, cols, rows, {}};
                 }
             } else if (keys['U'] != 1 && keys['c'] && keys['r']) {
                 image = image.scaled(keys['c'] * _currentScreen->currentTerminalDisplay()->terminalFont()->fontWidth(),

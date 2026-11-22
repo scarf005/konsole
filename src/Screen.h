@@ -55,10 +55,8 @@ struct TerminalGraphicsPlacement_t {
 struct TerminalGraphicsVirtualPlacement_t {
     QImage image;
     int cols, rows;
-    // image fitted into a box of cols x rows cells, cached by the painter
-    QSize box;
-    QPoint offset;
-    QPixmap fitted;
+    // image shrunk to its fitted size in device pixels, cached by the painter
+    QImage shrunk;
 };
 
 namespace Konsole
