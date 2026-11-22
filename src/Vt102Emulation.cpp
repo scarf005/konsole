@@ -2534,11 +2534,14 @@ void Vt102Emulation::processGraphicsToken(int tokenSize)
         }
         if (item.at(2).isNumber() || item.at(2) == QLatin1Char('-')) {
             bool ok = false;
-            keys[item.at(0).toLatin1()] = QStringView(item).mid(2).toLongLong(&ok);
-            if (!ok) {
+            const qint64 number = QStringView(item).mid(2).toLongLong(&ok);
+            // Keys are 32 bit integers, ids are unsigned
+            const bool isId = item.at(0) == QLatin1Char('i') || item.at(0) == QLatin1Char('I');
+            if (!ok || number > std::numeric_limits<quint32>::max() || number < (isId ? 0 : std::numeric_limits<qint32>::min())) {
                 reportDecodingError(token_apc('G'));
                 return;
             }
+            keys[item.at(0).toLatin1()] = number;
         } else {
             keys[item.at(0).toLatin1()] = item.at(2).toLatin1();
         }
