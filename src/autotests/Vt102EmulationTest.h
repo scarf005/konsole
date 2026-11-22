@@ -48,6 +48,7 @@ private Q_SLOTS:
     void testKittyGraphicsMalformed();
     void testKittyGraphicsMediums();
     void testKittyGraphicsVirtualPlacement();
+    void testKittyGraphicsIdRange();
     void testKittyGraphicsStorageLimit();
 
 private:

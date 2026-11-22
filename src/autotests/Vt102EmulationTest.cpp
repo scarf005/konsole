@@ -15,7 +15,9 @@
 #ifndef Q_OS_WIN
 #include <fcntl.h>
 #include <sys/mman.h>
+#include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/un.h>
 #include <unistd.h>
 #endif
 
@@ -868,6 +870,16 @@ void Vt102EmulationTest::testKittyGraphicsMediums()
     QCOMPARE(mkfifo(fifo.constData(), 0600), 0);
     send("a=t,t=f,f=24,s=1,v=1,i=8", fifo);
     QCOMPARE(em.lastSent, QByteArray("\033_Gi=8;EINVAL:Not a regular file\033\\"));
+    // A socket cannot be opened, so EINVAL shows that devices are rejected before open()
+    const QByteArray socketPath = QFile::encodeName(dir.filePath(QStringLiteral("socket")));
+    sockaddr_un address = {};
+    address.sun_family = AF_UNIX;
+    qstrncpy(address.sun_path, socketPath.constData(), sizeof address.sun_path);
+    const int socketFd = socket(AF_UNIX, SOCK_STREAM, 0);
+    QCOMPARE(bind(socketFd, reinterpret_cast<sockaddr *>(&address), sizeof address), 0);
+    send("a=t,t=f,f=24,s=1,v=1,i=8", socketPath);
+    close(socketFd);
+    QCOMPARE(em.lastSent, QByteArray("\033_Gi=8;EINVAL:Not a regular file\033\\"));
     send("a=t,t=f,f=24,s=1,v=1,i=8,O=7", path);
     QCOMPARE(em.lastSent, QByteArray("\033_Gi=8;EINVAL:Invalid size or offset\033\\"));
     const QByteArray sparse = QFile::encodeName(dir.filePath(QStringLiteral("sparse")));
@@ -970,6 +982,31 @@ void Vt102EmulationTest::testKittyGraphicsVirtualPlacement()
     send("\033_Ga=d,d=I,i=77,q=2\033\\");
     QVERIFY(!em._currentScreen->virtualPlacements().contains(77));
     QVERIFY(!em._graphicsImages.contains(77));
+
+    // Clearing the scrollback also drops virtual placements
+    send("\033_Ga=p,U=1,i=78,c=3,r=2,q=2\033\\");
+    QVERIFY(em._currentScreen->virtualPlacements().contains(78));
+    send("\033[3J");
+    QVERIFY(!em._screen[0]->virtualPlacements().contains(78));
+    QVERIFY(!em._screen[1]->virtualPlacements().contains(78));
+}
+
+void Vt102EmulationTest::testKittyGraphicsIdRange()
+{
+    TestEmulation em;
+    em.reset();
+    em.setCodec(TestEmulation::Utf8Codec);
+    auto send = [&em](const char *keys) {
+        const QByteArray command = graphicsCommand(keys, QByteArray(3, 0));
+        em.receiveData(command.constData(), command.size());
+    };
+
+    // i=2^32+1 and i=-1 do not fit an unsigned 32 bit id and are rejected, not truncated to 1 and 2^32-1
+    send("a=t,f=24,s=1,v=1,q=2,i=4294967297");
+    send("a=t,f=24,s=1,v=1,q=2,i=-1");
+    QVERIFY(em._graphicsImages.isEmpty());
+    send("a=t,f=24,s=1,v=1,q=2,i=4294967295");
+    QVERIFY(em._graphicsImages.contains(4294967295u));
 }
 
 void Vt102EmulationTest::testKittyGraphicsStorageLimit()
