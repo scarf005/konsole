@@ -160,6 +160,9 @@ void Vt102Emulation::clearHistory()
 {
     _graphicsImages.clear();
     _graphicsImageOrder.clear();
+    for (Screen *screen : _screen) {
+        screen->virtualPlacements().clear();
+    }
 
     Emulation::clearHistory();
 }
